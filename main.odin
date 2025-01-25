@@ -1,3 +1,4 @@
+#+feature dynamic-literals
 package main
 
 import "base:runtime"
@@ -51,7 +52,7 @@ image_available_semaphore: vk.Semaphore
 render_finished_semaphore: vk.Semaphore
 in_flight_fence: vk.Fence
 
-device_extensions: [dynamic]cstring
+device_extensions := [dynamic]cstring{vk.KHR_SWAPCHAIN_EXTENSION_NAME}
 
 init_window :: proc() {
 	glfw.Init()
@@ -66,8 +67,6 @@ init_window :: proc() {
 }
 
 init_vulkan :: proc() {
-	append(&device_extensions, vk.KHR_SWAPCHAIN_EXTENSION_NAME)
-
 	create_instance()
 	setup_debug_messenger()
 	create_surface()
