@@ -20,17 +20,21 @@ else
     # Vulkan SDK configuration for Linux (assuming standard installation)
     export VULKAN_SDK := /usr/share/vulkan
     export VK_LAYER_PATH := $(VULKAN_SDK)/explicit_layer.d
+    # export VK_LOADER_DEBUG=all
 endif
 
 # Build target
-odinvulkan: main.odin
+VulkanTestOdin: main.odin
 	odin build . -debug
 
 # Phony targets
 .PHONY: test clean
 
-test: odinvulkan
-	./odinvulkan
+test: VulkanTestOdin
+	./VulkanTestOdin
+
+debug: VulkanTestOdin
+	gdb ./VulkanTestOdin
 
 clean:
-	rm -f odinvulkan
+	rm -f VulkanTestOdin

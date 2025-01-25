@@ -16,10 +16,10 @@ when ODIN_OS == .Darwin {
 	foreign import __ "system:System.framework"
 }
 
-g_ctx: runtime.Context
+MAX_FRAMES_IN_FLIGHT :: 2
 
 glfw_error_callback :: proc "c" (code: i32, description: cstring) {
-	context = g_ctx
+	context = runtime.default_context()
 	log.errorf("glfw: %i: %s", code, description)
 }
 
@@ -46,10 +46,11 @@ pipeline_layout: vk.PipelineLayout
 graphics_pipeline: vk.Pipeline
 swap_chain_framebuffers: [dynamic]vk.Framebuffer
 command_pool: vk.CommandPool
-command_buffer: vk.CommandBuffer
-image_available_semaphore: vk.Semaphore
-render_finished_semaphore: vk.Semaphore
-in_flight_fence: vk.Fence
+command_buffers: [MAX_FRAMES_IN_FLIGHT]vk.CommandBuffer
+image_available_semaphores: [MAX_FRAMES_IN_FLIGHT]vk.Semaphore
+render_finished_semaphores: [MAX_FRAMES_IN_FLIGHT]vk.Semaphore
+in_flight_fences: [MAX_FRAMES_IN_FLIGHT]vk.Fence
+framebuffer_resized: bool
 
 device_extensions: [dynamic]cstring
 
@@ -59,10 +60,11 @@ init_window :: proc() {
 	// Don't create an OpenGL context
 	glfw.WindowHint(glfw.CLIENT_API, glfw.NO_API)
 
-	// Disable resizing windows for now
-	glfw.WindowHint(glfw.RESIZABLE, glfw.FALSE)
-
 	window = glfw.CreateWindow(WIDTH, HEIGHT, "Vulkan", nil, nil)
+
+	glfw.SetFramebufferSizeCallback(window, proc "c" (_: glfw.WindowHandle, _, _: i32) {
+		framebuffer_resized = true
+	})
 }
 
 init_vulkan :: proc() {
@@ -78,7 +80,7 @@ init_vulkan :: proc() {
 	create_graphics_pipeline()
 	create_framebuffers()
 	create_command_pool()
-	create_command_buffer()
+	create_command_buffers()
 	create_sync_objects()
 }
 
@@ -92,20 +94,22 @@ create_sync_objects :: proc() {
 		flags = {.SIGNALED}, // Create fence in signaled state so we don't block on first render
 	}
 
-	must(vk.CreateSemaphore(device, &semaphore_info, nil, &image_available_semaphore))
-	must(vk.CreateSemaphore(device, &semaphore_info, nil, &render_finished_semaphore))
-	must(vk.CreateFence(device, &fence_info, nil, &in_flight_fence))
+	for i := 0; i < MAX_FRAMES_IN_FLIGHT; i += 1 {
+		must(vk.CreateSemaphore(device, &semaphore_info, nil, &image_available_semaphores[i]))
+		must(vk.CreateSemaphore(device, &semaphore_info, nil, &render_finished_semaphores[i]))
+		must(vk.CreateFence(device, &fence_info, nil, &in_flight_fences[i]))
+	}
 }
 
-create_command_buffer :: proc() {
+create_command_buffers :: proc() {
 	alloc_info := vk.CommandBufferAllocateInfo {
 		sType              = .COMMAND_BUFFER_ALLOCATE_INFO,
 		commandPool        = command_pool,
 		level              = .PRIMARY,
-		commandBufferCount = 1,
+		commandBufferCount = MAX_FRAMES_IN_FLIGHT,
 	}
 
-	must(vk.AllocateCommandBuffers(device, &alloc_info, &command_buffer))
+	must(vk.AllocateCommandBuffers(device, &alloc_info, raw_data(command_buffers[:])))
 }
 
 create_command_pool :: proc() {
@@ -458,6 +462,34 @@ create_swap_chain :: proc() {
 
 	swap_chain_image_format = surface_format.format
 	swap_chain_extent = extent
+}
+
+recreate_swap_chain :: proc() {
+	width, height := glfw.GetFramebufferSize(window)
+	for width == 0 || height == 0 {
+		width, height = glfw.GetFramebufferSize(window)
+		glfw.WaitEvents()
+	}
+
+	vk.DeviceWaitIdle(device)
+
+	cleanup_swap_chain()
+
+	create_swap_chain()
+	create_image_views()
+	create_framebuffers()
+}
+
+cleanup_swap_chain :: proc() {
+	for framebuffer in swap_chain_framebuffers {
+		vk.DestroyFramebuffer(device, framebuffer, nil)
+	}
+
+	for image_view in swap_chain_image_views {
+		vk.DestroyImageView(device, image_view, nil)
+	}
+
+	vk.DestroySwapchainKHR(device, swap_chain, nil)
 }
 
 create_logical_device :: proc() {
@@ -830,23 +862,35 @@ record_command_buffer :: proc(command_buffer: vk.CommandBuffer, image_index: u32
 	must(vk.EndCommandBuffer(command_buffer))
 }
 
-draw_frame :: proc() {
-	vk.WaitForFences(device, 1, &in_flight_fence, true, max(u64))
-	vk.ResetFences(device, 1, &in_flight_fence)
+draw_frame :: proc(current_frame: u32) -> u32 {
+	vk.WaitForFences(device, 1, &in_flight_fences[current_frame], true, max(u64))
 
 	image_index: u32
-	vk.AcquireNextImageKHR(
+	result := vk.AcquireNextImageKHR(
 		device,
 		swap_chain,
 		max(u64),
-		image_available_semaphore,
+		image_available_semaphores[current_frame],
 		0,
 		&image_index,
 	)
-	vk.ResetCommandBuffer(command_buffer, {})
-	record_command_buffer(command_buffer, image_index)
 
-	wait_semaphores := []vk.Semaphore{image_available_semaphore}
+	#partial switch result {
+	case .ERROR_OUT_OF_DATE_KHR:
+		{
+			recreate_swap_chain()
+			return current_frame
+		}
+	case .SUCCESS, .SUBOPTIMAL_KHR:
+		vk.ResetFences(device, 1, &in_flight_fences[current_frame])
+	case:
+		log.panic("failed to acquire swap chain image")
+	}
+
+	vk.ResetCommandBuffer(command_buffers[current_frame], {})
+	record_command_buffer(command_buffers[current_frame], image_index)
+
+	wait_semaphores := []vk.Semaphore{image_available_semaphores[current_frame]}
 	wait_stages := []vk.PipelineStageFlags{{.COLOR_ATTACHMENT_OUTPUT}}
 
 	submit_info := vk.SubmitInfo {
@@ -855,59 +899,65 @@ draw_frame :: proc() {
 		pWaitSemaphores      = raw_data(wait_semaphores),
 		pWaitDstStageMask    = raw_data(wait_stages),
 		commandBufferCount   = 1,
-		pCommandBuffers      = &command_buffer,
+		pCommandBuffers      = &command_buffers[current_frame],
 		signalSemaphoreCount = 1,
-		pSignalSemaphores    = &render_finished_semaphore,
+		pSignalSemaphores    = &render_finished_semaphores[current_frame],
 	}
 
-	must(vk.QueueSubmit(graphics_queue, 1, &submit_info, in_flight_fence))
+	must(vk.QueueSubmit(graphics_queue, 1, &submit_info, in_flight_fences[current_frame]))
 
 	swapchains := []vk.SwapchainKHR{swap_chain}
 	present_info := vk.PresentInfoKHR {
 		sType              = .PRESENT_INFO_KHR,
 		waitSemaphoreCount = 1,
-		pWaitSemaphores    = &render_finished_semaphore,
+		pWaitSemaphores    = &render_finished_semaphores[current_frame],
 		swapchainCount     = 1,
 		pSwapchains        = raw_data(swapchains),
 		pImageIndices      = &image_index,
 	}
 
-	vk.QueuePresentKHR(present_queue, &present_info)
+	result = vk.QueuePresentKHR(present_queue, &present_info)
+
+	if result == .ERROR_OUT_OF_DATE_KHR || result == .SUBOPTIMAL_KHR || framebuffer_resized {
+		framebuffer_resized = false
+		recreate_swap_chain()
+	} else if result != .SUCCESS {
+		log.panic("failed to present swap chain image")
+	}
+
+	return (current_frame + 1) & MAX_FRAMES_IN_FLIGHT
 }
 
 main_loop :: proc() {
+	current_frame: u32 = 0
 	for !glfw.WindowShouldClose(window) {
 		free_all(context.temp_allocator)
 
 		glfw.PollEvents()
-		draw_frame()
+		current_frame = draw_frame(current_frame)
 	}
 
 	vk.DeviceWaitIdle(device)
 }
 
 cleanup :: proc() {
-	vk.DestroySemaphore(device, image_available_semaphore, nil)
-	vk.DestroySemaphore(device, render_finished_semaphore, nil)
-	vk.DestroyFence(device, in_flight_fence, nil)
+	for i := 0; i < MAX_FRAMES_IN_FLIGHT; i += 1 {
+		vk.DestroySemaphore(device, image_available_semaphores[i], nil)
+		vk.DestroySemaphore(device, render_finished_semaphores[i], nil)
+		vk.DestroyFence(device, in_flight_fences[i], nil)
+	}
+
 	vk.DestroyCommandPool(device, command_pool, nil)
 
-	for framebuffer in swap_chain_framebuffers {
-		vk.DestroyFramebuffer(device, framebuffer, nil)
-	}
+	cleanup_swap_chain()
 	delete(swap_chain_framebuffers)
+	delete(swap_chain_image_views)
+	delete(swap_chain_images)
 
 	vk.DestroyPipeline(device, graphics_pipeline, nil)
 	vk.DestroyPipelineLayout(device, pipeline_layout, nil)
 	vk.DestroyRenderPass(device, render_pass, nil)
 
-	for image_view in swap_chain_image_views {
-		vk.DestroyImageView(device, image_view, nil)
-	}
-	delete(swap_chain_image_views)
-	delete(swap_chain_images)
-
-	vk.DestroySwapchainKHR(device, swap_chain, nil)
 	vk.DestroyDevice(device, nil)
 	vk.DestroySurfaceKHR(instance, surface, nil)
 	when ENABLE_VALIDATION_LAYERS {
