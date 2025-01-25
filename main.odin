@@ -34,11 +34,13 @@ Vertex :: struct {
 	color: [3]f32,
 }
 
+//odinfmt: disable
 vertices := []Vertex {
-	{{0.0, -0.5}, {1.0, 0.0, 0.0}},
-	{{0.5, 0.5}, {0.0, 1.0, 0.0}},
-	{{-0.5, 0.5}, {0.0, 0.0, 1.0}},
+	{{ 0.0, -0.5}, {1.0, 0.0, 0.0}},
+	{{ 0.5,  0.5}, {0.0, 1.0, 0.0}},
+	{{-0.5,  0.5}, {0.0, 0.0, 1.0}},
 }
+//odinfmt: enable
 
 get_vertex_binding_description :: proc() -> vk.VertexInputBindingDescription {
 	binding_description := vk.VertexInputBindingDescription {
