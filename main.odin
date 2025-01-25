@@ -94,6 +94,36 @@ vertex_buffer_memory: vk.DeviceMemory
 
 device_extensions: [dynamic]cstring
 
+create_buffer :: proc(
+	size: vk.DeviceSize,
+	usage: vk.BufferUsageFlags,
+	properties: vk.MemoryPropertyFlags,
+	buffer: ^vk.Buffer,
+	buffer_memory: ^vk.DeviceMemory,
+) {
+	buffer_info := vk.BufferCreateInfo {
+		sType       = .BUFFER_CREATE_INFO,
+		size        = size,
+		usage       = usage,
+		sharingMode = .EXCLUSIVE,
+	}
+
+	must(vk.CreateBuffer(device, &buffer_info, nil, buffer))
+
+	mem_requirements: vk.MemoryRequirements
+	vk.GetBufferMemoryRequirements(device, buffer^, &mem_requirements)
+
+	alloc_info := vk.MemoryAllocateInfo {
+		sType           = .MEMORY_ALLOCATE_INFO,
+		allocationSize  = mem_requirements.size,
+		memoryTypeIndex = find_memory_type(mem_requirements.memoryTypeBits, properties),
+	}
+
+	must(vk.AllocateMemory(device, &alloc_info, nil, buffer_memory))
+
+	vk.BindBufferMemory(device, buffer^, buffer_memory^, 0)
+}
+
 init_window :: proc() {
 	glfw.Init()
 
@@ -140,36 +170,74 @@ find_memory_type :: proc(type_filter: u32, properties: vk.MemoryPropertyFlags) -
 }
 
 create_vertex_buffer :: proc() {
-	buffer_info := vk.BufferCreateInfo {
-		sType       = .BUFFER_CREATE_INFO,
-		size        = vk.DeviceSize(size_of(vertices[0]) * len(vertices)),
-		usage       = {.VERTEX_BUFFER},
-		sharingMode = .EXCLUSIVE,
-	}
+	buffer_size: vk.DeviceSize = vk.DeviceSize(size_of(vertices[0]) * len(vertices))
 
-	must(vk.CreateBuffer(device, &buffer_info, nil, &vertex_buffer))
+	staging_buffer: vk.Buffer
+	staging_buffer_memory: vk.DeviceMemory
 
-	mem_requirements: vk.MemoryRequirements
-
-	vk.GetBufferMemoryRequirements(device, vertex_buffer, &mem_requirements)
-
-	alloc_info := vk.MemoryAllocateInfo {
-		sType           = .MEMORY_ALLOCATE_INFO,
-		allocationSize  = mem_requirements.size,
-		memoryTypeIndex = find_memory_type(
-			mem_requirements.memoryTypeBits,
-			{.HOST_VISIBLE, .HOST_COHERENT},
-		),
-	}
-
-	must(vk.AllocateMemory(device, &alloc_info, nil, &vertex_buffer_memory))
-
-	vk.BindBufferMemory(device, vertex_buffer, vertex_buffer_memory, 0)
+	create_buffer(
+		buffer_size,
+		{.TRANSFER_SRC},
+		{.HOST_VISIBLE, .HOST_COHERENT},
+		&staging_buffer,
+		&staging_buffer_memory,
+	)
 
 	data: rawptr
-	vk.MapMemory(device, vertex_buffer_memory, 0, buffer_info.size, {}, &data)
-	intrinsics.mem_copy_non_overlapping(data, raw_data(vertices), buffer_info.size)
-	vk.UnmapMemory(device, vertex_buffer_memory)
+	vk.MapMemory(device, staging_buffer_memory, 0, buffer_size, {}, &data)
+	intrinsics.mem_copy_non_overlapping(data, raw_data(vertices), buffer_size)
+	vk.UnmapMemory(device, staging_buffer_memory)
+
+	create_buffer(
+		buffer_size,
+		{.TRANSFER_DST, .VERTEX_BUFFER},
+		{.DEVICE_LOCAL},
+		&vertex_buffer,
+		&vertex_buffer_memory,
+	)
+
+	copy_buffer(staging_buffer, vertex_buffer, buffer_size)
+
+	vk.DestroyBuffer(device, staging_buffer, nil)
+	vk.FreeMemory(device, staging_buffer_memory, nil)
+}
+
+copy_buffer :: proc(src_buffer, dst_buffer: vk.Buffer, size: vk.DeviceSize) {
+	alloc_info := vk.CommandBufferAllocateInfo {
+		sType              = .COMMAND_BUFFER_ALLOCATE_INFO,
+		level              = .PRIMARY,
+		commandPool        = command_pool,
+		commandBufferCount = 1,
+	}
+
+	command_buffer: vk.CommandBuffer
+	vk.AllocateCommandBuffers(device, &alloc_info, &command_buffer)
+
+	begin_info := vk.CommandBufferBeginInfo {
+		sType = .COMMAND_BUFFER_BEGIN_INFO,
+		flags = {.ONE_TIME_SUBMIT},
+	}
+
+	vk.BeginCommandBuffer(command_buffer, &begin_info)
+
+	copy_region := vk.BufferCopy {
+		size = size,
+	}
+
+	vk.CmdCopyBuffer(command_buffer, src_buffer, dst_buffer, 1, &copy_region)
+
+	vk.EndCommandBuffer(command_buffer)
+
+	submit_info := vk.SubmitInfo {
+		sType              = .SUBMIT_INFO,
+		commandBufferCount = 1,
+		pCommandBuffers    = &command_buffer,
+	}
+
+	vk.QueueSubmit(graphics_queue, 1, &submit_info, 0)
+	vk.QueueWaitIdle(graphics_queue)
+
+	vk.FreeCommandBuffers(device, command_pool, 1, &command_buffer)
 }
 
 create_sync_objects :: proc() {
