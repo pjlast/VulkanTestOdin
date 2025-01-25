@@ -1,4 +1,3 @@
-#+feature dynamic-literals
 package main
 
 import "base:runtime"
@@ -52,7 +51,7 @@ image_available_semaphore: vk.Semaphore
 render_finished_semaphore: vk.Semaphore
 in_flight_fence: vk.Fence
 
-device_extensions := [dynamic]cstring{vk.KHR_SWAPCHAIN_EXTENSION_NAME}
+device_extensions: [dynamic]cstring
 
 init_window :: proc() {
 	glfw.Init()
@@ -67,6 +66,7 @@ init_window :: proc() {
 }
 
 init_vulkan :: proc() {
+	append(&device_extensions, vk.KHR_SWAPCHAIN_EXTENSION_NAME)
 	create_instance()
 	setup_debug_messenger()
 	create_surface()
@@ -462,8 +462,8 @@ create_swap_chain :: proc() {
 
 create_logical_device :: proc() {
 	indices := find_queue_families(physical_device)
-	queue_create_infos: [dynamic]vk.DeviceQueueCreateInfo
-	unique_queue_families := make(map[u32]struct {})
+	queue_create_infos := make([dynamic]vk.DeviceQueueCreateInfo, context.temp_allocator)
+	unique_queue_families := make(map[u32]struct {}, context.temp_allocator)
 	unique_queue_families[indices.graphics_family.(u32)] = {}
 	unique_queue_families[indices.present_family.(u32)] = {}
 
@@ -521,7 +521,7 @@ find_queue_families :: proc(device: vk.PhysicalDevice) -> Queue_Family_Indices {
 	queue_family_count: u32
 	vk.GetPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, nil)
 
-	queue_families := make([]vk.QueueFamilyProperties, queue_family_count)
+	queue_families := make([]vk.QueueFamilyProperties, queue_family_count, context.temp_allocator)
 	vk.GetPhysicalDeviceQueueFamilyProperties(
 		device,
 		&queue_family_count,
@@ -554,7 +554,7 @@ check_device_extension_support :: proc(device: vk.PhysicalDevice) -> bool {
 	extension_count: u32
 	vk.EnumerateDeviceExtensionProperties(device, nil, &extension_count, nil)
 
-	available_extensions := make([]vk.ExtensionProperties, extension_count)
+	available_extensions := make([]vk.ExtensionProperties, extension_count, context.temp_allocator)
 	vk.EnumerateDeviceExtensionProperties(
 		device,
 		nil,
@@ -562,7 +562,7 @@ check_device_extension_support :: proc(device: vk.PhysicalDevice) -> bool {
 		raw_data(available_extensions),
 	)
 
-	required_extensions := make(map[cstring]struct {})
+	required_extensions := make(map[cstring]struct {}, context.temp_allocator)
 	for device_extension in device_extensions {
 		required_extensions[device_extension] = {}
 	}
@@ -635,7 +635,7 @@ pick_physical_device :: proc() {
 
 	assert(device_count != 0, "failed to find GPUs with vulkan support")
 
-	devices := make([]vk.PhysicalDevice, device_count)
+	devices := make([]vk.PhysicalDevice, device_count, context.temp_allocator)
 
 	vk.EnumeratePhysicalDevices(instance, &device_count, raw_data(devices))
 
@@ -669,7 +669,7 @@ check_validation_layer_support :: proc() -> bool {
 	layer_count: u32
 	vk.EnumerateInstanceLayerProperties(&layer_count, nil)
 
-	available_layers := make([]vk.LayerProperties, layer_count)
+	available_layers := make([]vk.LayerProperties, layer_count, context.temp_allocator)
 	vk.EnumerateInstanceLayerProperties(&layer_count, raw_data(available_layers))
 
 	for layer_name in validation_layers {
@@ -691,20 +691,21 @@ check_validation_layer_support :: proc() -> bool {
 }
 
 get_required_extensions :: proc() -> [dynamic]cstring {
-	extensions: [dynamic]cstring
 	required_glfw_extensions := glfw.GetRequiredInstanceExtensions()
+	extensions := make([dynamic]cstring, 0, len(required_glfw_extensions))
 
-	for required_glfw_extension in required_glfw_extensions {
-		append(&extensions, required_glfw_extension)
-	}
+	append(&extensions, ..required_glfw_extensions)
 
 	when ENABLE_VALIDATION_LAYERS {
 		append(&extensions, vk.EXT_DEBUG_UTILS_EXTENSION_NAME)
 	}
 
 	when ODIN_OS == .Darwin {
-		append(&extensions, vk.KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME)
-		append(&extensions, vk.KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME)
+		append(
+			&extensions,
+			vk.KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME,
+			vk.KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME,
+		)
 	}
 
 	return extensions
@@ -892,6 +893,7 @@ cleanup :: proc() {
 	for framebuffer in swap_chain_framebuffers {
 		vk.DestroyFramebuffer(device, framebuffer, nil)
 	}
+	delete(swap_chain_framebuffers)
 
 	vk.DestroyPipeline(device, graphics_pipeline, nil)
 	vk.DestroyPipelineLayout(device, pipeline_layout, nil)
@@ -900,6 +902,8 @@ cleanup :: proc() {
 	for image_view in swap_chain_image_views {
 		vk.DestroyImageView(device, image_view, nil)
 	}
+	delete(swap_chain_image_views)
+	delete(swap_chain_images)
 
 	vk.DestroySwapchainKHR(device, swap_chain, nil)
 	vk.DestroyDevice(device, nil)
@@ -908,6 +912,8 @@ cleanup :: proc() {
 		vk.DestroyDebugUtilsMessengerEXT(instance, debug_messenger, nil)
 	}
 	vk.DestroyInstance(instance, nil)
+	delete(device_extensions)
+
 	glfw.DestroyWindow(window)
 	glfw.Terminate()
 }
