@@ -1,5 +1,6 @@
 package main
 
+import "base:intrinsics"
 import "base:runtime"
 import "core:fmt"
 import "core:log"
@@ -28,6 +29,41 @@ HEIGHT :: 600
 
 ENABLE_VALIDATION_LAYERS :: #config(ENABLE_VALIDATION_LAYERS, ODIN_DEBUG)
 
+Vertex :: struct {
+	pos:   [2]f32,
+	color: [3]f32,
+}
+
+vertices := []Vertex {
+	{{0.0, -0.5}, {1.0, 0.0, 0.0}},
+	{{0.5, 0.5}, {0.0, 1.0, 0.0}},
+	{{-0.5, 0.5}, {0.0, 0.0, 1.0}},
+}
+
+get_vertex_binding_description :: proc() -> vk.VertexInputBindingDescription {
+	binding_description := vk.VertexInputBindingDescription {
+		binding   = 0,
+		stride    = size_of(Vertex),
+		inputRate = .VERTEX,
+	}
+
+	return binding_description
+}
+
+get_vertex_attribute_descriptions :: proc() -> [2]vk.VertexInputAttributeDescription {
+	attribute_descriptions := [2]vk.VertexInputAttributeDescription {
+		{binding = 0, location = 0, format = .R32G32_SFLOAT, offset = u32(offset_of(Vertex, pos))},
+		{
+			binding = 0,
+			location = 1,
+			format = .R32G32B32_SFLOAT,
+			offset = u32(offset_of(Vertex, color)),
+		},
+	}
+
+	return attribute_descriptions
+}
+
 window: glfw.WindowHandle
 instance: vk.Instance
 debug_messenger: vk.DebugUtilsMessengerEXT
@@ -51,6 +87,8 @@ image_available_semaphores: [MAX_FRAMES_IN_FLIGHT]vk.Semaphore
 render_finished_semaphores: [MAX_FRAMES_IN_FLIGHT]vk.Semaphore
 in_flight_fences: [MAX_FRAMES_IN_FLIGHT]vk.Fence
 framebuffer_resized: bool
+vertex_buffer: vk.Buffer
+vertex_buffer_memory: vk.DeviceMemory
 
 device_extensions: [dynamic]cstring
 
@@ -80,8 +118,56 @@ init_vulkan :: proc() {
 	create_graphics_pipeline()
 	create_framebuffers()
 	create_command_pool()
+	create_vertex_buffer()
 	create_command_buffers()
 	create_sync_objects()
+}
+
+find_memory_type :: proc(type_filter: u32, properties: vk.MemoryPropertyFlags) -> u32 {
+	mem_properties: vk.PhysicalDeviceMemoryProperties
+	vk.GetPhysicalDeviceMemoryProperties(physical_device, &mem_properties)
+
+	for i: u32 = 0; i < mem_properties.memoryTypeCount; i += 1 {
+		if type_filter & (1 << i) > 0 &&
+		   (mem_properties.memoryTypes[i].propertyFlags & properties) == properties {
+			return i
+		}
+	}
+
+	log.panic("failed to find suitable memory type")
+}
+
+create_vertex_buffer :: proc() {
+	buffer_info := vk.BufferCreateInfo {
+		sType       = .BUFFER_CREATE_INFO,
+		size        = vk.DeviceSize(size_of(vertices[0]) * len(vertices)),
+		usage       = {.VERTEX_BUFFER},
+		sharingMode = .EXCLUSIVE,
+	}
+
+	must(vk.CreateBuffer(device, &buffer_info, nil, &vertex_buffer))
+
+	mem_requirements: vk.MemoryRequirements
+
+	vk.GetBufferMemoryRequirements(device, vertex_buffer, &mem_requirements)
+
+	alloc_info := vk.MemoryAllocateInfo {
+		sType           = .MEMORY_ALLOCATE_INFO,
+		allocationSize  = mem_requirements.size,
+		memoryTypeIndex = find_memory_type(
+			mem_requirements.memoryTypeBits,
+			{.HOST_VISIBLE, .HOST_COHERENT},
+		),
+	}
+
+	must(vk.AllocateMemory(device, &alloc_info, nil, &vertex_buffer_memory))
+
+	vk.BindBufferMemory(device, vertex_buffer, vertex_buffer_memory, 0)
+
+	data: rawptr
+	vk.MapMemory(device, vertex_buffer_memory, 0, buffer_info.size, {}, &data)
+	intrinsics.mem_copy_non_overlapping(data, raw_data(vertices), buffer_info.size)
+	vk.UnmapMemory(device, vertex_buffer_memory)
 }
 
 create_sync_objects :: proc() {
@@ -191,10 +277,15 @@ create_graphics_pipeline :: proc() {
 		pDynamicStates    = raw_data(dynamic_states),
 	}
 
+	binding_description := get_vertex_binding_description()
+	attribute_descriptions := get_vertex_attribute_descriptions()
+
 	vertex_input_info := vk.PipelineVertexInputStateCreateInfo {
 		sType                           = .PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-		vertexBindingDescriptionCount   = 0,
-		vertexAttributeDescriptionCount = 0,
+		vertexBindingDescriptionCount   = 1,
+		pVertexBindingDescriptions      = &binding_description,
+		vertexAttributeDescriptionCount = u32(len(attribute_descriptions)),
+		pVertexAttributeDescriptions    = raw_data(attribute_descriptions[:]),
 	}
 
 	input_assembly := vk.PipelineInputAssemblyStateCreateInfo {
@@ -837,6 +928,10 @@ record_command_buffer :: proc(command_buffer: vk.CommandBuffer, image_index: u32
 	vk.CmdBeginRenderPass(command_buffer, &render_pass_info, .INLINE)
 	vk.CmdBindPipeline(command_buffer, .GRAPHICS, graphics_pipeline)
 
+	vertex_buffers := []vk.Buffer{vertex_buffer}
+	offsets := []vk.DeviceSize{0}
+	vk.CmdBindVertexBuffers(command_buffer, 0, 1, raw_data(vertex_buffers), raw_data(offsets))
+
 	viewport := vk.Viewport {
 		x        = 0.0,
 		y        = 0.0,
@@ -855,7 +950,7 @@ record_command_buffer :: proc(command_buffer: vk.CommandBuffer, image_index: u32
 
 	vk.CmdSetScissor(command_buffer, 0, 1, &scissor)
 
-	vk.CmdDraw(command_buffer, 3, 1, 0, 0)
+	vk.CmdDraw(command_buffer, u32(len(vertices)), 1, 0, 0)
 
 	vk.CmdEndRenderPass(command_buffer)
 
@@ -953,6 +1048,9 @@ cleanup :: proc() {
 	delete(swap_chain_framebuffers)
 	delete(swap_chain_image_views)
 	delete(swap_chain_images)
+
+	vk.DestroyBuffer(device, vertex_buffer, nil)
+	vk.FreeMemory(device, vertex_buffer_memory, nil)
 
 	vk.DestroyPipeline(device, graphics_pipeline, nil)
 	vk.DestroyPipelineLayout(device, pipeline_layout, nil)
