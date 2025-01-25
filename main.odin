@@ -36,11 +36,14 @@ Vertex :: struct {
 
 //odinfmt: disable
 vertices := []Vertex {
-	{{ 0.0, -0.5}, {1.0, 0.0, 0.0}},
-	{{ 0.5,  0.5}, {0.0, 1.0, 0.0}},
-	{{-0.5,  0.5}, {0.0, 0.0, 1.0}},
+	{{-0.5, -0.5}, {1.0, 0.0, 0.0}},
+	{{ 0.5, -0.5}, {0.0, 1.0, 0.0}},
+	{{ 0.5,  0.5}, {0.0, 0.0, 1.0}},
+	{{-0.5,  0.5}, {1.0, 1.0, 1.0}},
 }
 //odinfmt: enable
+
+indices := []u16{0, 1, 2, 2, 3, 0}
 
 get_vertex_binding_description :: proc() -> vk.VertexInputBindingDescription {
 	binding_description := vk.VertexInputBindingDescription {
@@ -91,6 +94,8 @@ in_flight_fences: [MAX_FRAMES_IN_FLIGHT]vk.Fence
 framebuffer_resized: bool
 vertex_buffer: vk.Buffer
 vertex_buffer_memory: vk.DeviceMemory
+index_buffer: vk.Buffer
+index_buffer_memory: vk.DeviceMemory
 
 device_extensions: [dynamic]cstring
 
@@ -151,6 +156,7 @@ init_vulkan :: proc() {
 	create_framebuffers()
 	create_command_pool()
 	create_vertex_buffer()
+	create_index_buffer()
 	create_command_buffers()
 	create_sync_objects()
 }
@@ -167,6 +173,39 @@ find_memory_type :: proc(type_filter: u32, properties: vk.MemoryPropertyFlags) -
 	}
 
 	log.panic("failed to find suitable memory type")
+}
+
+create_index_buffer :: proc() {
+	buffer_size := vk.DeviceSize(size_of(indices[0]) * len(indices))
+
+	staging_buffer: vk.Buffer
+	staging_buffer_memory: vk.DeviceMemory
+
+	create_buffer(
+		buffer_size,
+		{.TRANSFER_SRC},
+		{.HOST_VISIBLE, .HOST_COHERENT},
+		&staging_buffer,
+		&staging_buffer_memory,
+	)
+
+	data: rawptr
+	vk.MapMemory(device, staging_buffer_memory, 0, buffer_size, {}, &data)
+	intrinsics.mem_copy_non_overlapping(data, raw_data(indices), buffer_size)
+	vk.UnmapMemory(device, staging_buffer_memory)
+
+	create_buffer(
+		buffer_size,
+		{.TRANSFER_DST, .INDEX_BUFFER},
+		{.DEVICE_LOCAL},
+		&index_buffer,
+		&index_buffer_memory,
+	)
+
+	copy_buffer(staging_buffer, index_buffer, buffer_size)
+
+	vk.DestroyBuffer(device, staging_buffer, nil)
+	vk.FreeMemory(device, staging_buffer_memory, nil)
 }
 
 create_vertex_buffer :: proc() {
@@ -1002,6 +1041,8 @@ record_command_buffer :: proc(command_buffer: vk.CommandBuffer, image_index: u32
 	offsets := []vk.DeviceSize{0}
 	vk.CmdBindVertexBuffers(command_buffer, 0, 1, raw_data(vertex_buffers), raw_data(offsets))
 
+	vk.CmdBindIndexBuffer(command_buffer, index_buffer, 0, .UINT16)
+
 	viewport := vk.Viewport {
 		x        = 0.0,
 		y        = 0.0,
@@ -1020,7 +1061,7 @@ record_command_buffer :: proc(command_buffer: vk.CommandBuffer, image_index: u32
 
 	vk.CmdSetScissor(command_buffer, 0, 1, &scissor)
 
-	vk.CmdDraw(command_buffer, u32(len(vertices)), 1, 0, 0)
+	vk.CmdDrawIndexed(command_buffer, u32(len(indices)), 1, 0, 0, 0)
 
 	vk.CmdEndRenderPass(command_buffer)
 
@@ -1118,6 +1159,9 @@ cleanup :: proc() {
 	delete(swap_chain_framebuffers)
 	delete(swap_chain_image_views)
 	delete(swap_chain_images)
+
+	vk.DestroyBuffer(device, index_buffer, nil)
+	vk.FreeMemory(device, index_buffer_memory, nil)
 
 	vk.DestroyBuffer(device, vertex_buffer, nil)
 	vk.FreeMemory(device, vertex_buffer_memory, nil)
