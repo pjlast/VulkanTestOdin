@@ -876,7 +876,9 @@ draw_frame :: proc() {
 }
 
 main_loop :: proc() {
-	for (!glfw.WindowShouldClose(window)) {
+	for !glfw.WindowShouldClose(window) {
+		free_all(context.temp_allocator)
+
 		glfw.PollEvents()
 		draw_frame()
 	}
