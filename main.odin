@@ -5,7 +5,9 @@ import "base:runtime"
 import "core:fmt"
 import "core:log"
 import "core:math"
+import "core:math/linalg"
 import "core:strings"
+import "core:time"
 import "vendor:glfw"
 import vk "vendor:vulkan"
 
@@ -32,6 +34,12 @@ ENABLE_VALIDATION_LAYERS :: #config(ENABLE_VALIDATION_LAYERS, ODIN_DEBUG)
 Vertex :: struct {
 	pos:   [2]f32,
 	color: [3]f32,
+}
+
+Uniform_Buffer_Object :: struct #align (16) {
+	model: linalg.Matrix4f32,
+	view:  linalg.Matrix4f32,
+	proj:  linalg.Matrix4f32,
 }
 
 //odinfmt: disable
@@ -83,6 +91,7 @@ swap_chain_image_format: vk.Format
 swap_chain_extent: vk.Extent2D
 swap_chain_image_views: [dynamic]vk.ImageView
 render_pass: vk.RenderPass
+descriptor_set_layout: vk.DescriptorSetLayout
 pipeline_layout: vk.PipelineLayout
 graphics_pipeline: vk.Pipeline
 swap_chain_framebuffers: [dynamic]vk.Framebuffer
@@ -96,6 +105,11 @@ vertex_buffer: vk.Buffer
 vertex_buffer_memory: vk.DeviceMemory
 index_buffer: vk.Buffer
 index_buffer_memory: vk.DeviceMemory
+uniform_buffers: [MAX_FRAMES_IN_FLIGHT]vk.Buffer
+uniform_buffers_memory: [MAX_FRAMES_IN_FLIGHT]vk.DeviceMemory
+uniform_buffers_mapped: [MAX_FRAMES_IN_FLIGHT]rawptr
+descriptor_pool: vk.DescriptorPool
+descriptor_sets: [MAX_FRAMES_IN_FLIGHT]vk.DescriptorSet
 
 device_extensions: [dynamic]cstring
 
@@ -152,13 +166,113 @@ init_vulkan :: proc() {
 	create_swap_chain()
 	create_image_views()
 	create_render_pass()
+	create_descriptor_set_layout()
 	create_graphics_pipeline()
 	create_framebuffers()
 	create_command_pool()
 	create_vertex_buffer()
 	create_index_buffer()
+	create_uniform_buffers()
+	create_descriptor_pool()
+	create_descriptor_sets()
 	create_command_buffers()
 	create_sync_objects()
+}
+
+create_descriptor_sets :: proc() {
+	layouts := [MAX_FRAMES_IN_FLIGHT]vk.DescriptorSetLayout {
+		descriptor_set_layout,
+		descriptor_set_layout,
+	}
+
+	alloc_info := vk.DescriptorSetAllocateInfo {
+		sType              = .DESCRIPTOR_SET_ALLOCATE_INFO,
+		descriptorPool     = descriptor_pool,
+		descriptorSetCount = MAX_FRAMES_IN_FLIGHT,
+		pSetLayouts        = raw_data(layouts[:]),
+	}
+
+	must(vk.AllocateDescriptorSets(device, &alloc_info, raw_data(descriptor_sets[:])))
+
+	for i := 0; i < MAX_FRAMES_IN_FLIGHT; i += 1 {
+		buffer_info := vk.DescriptorBufferInfo {
+			buffer = uniform_buffers[i],
+			offset = 0,
+			range  = size_of(Uniform_Buffer_Object),
+		}
+
+		descriptor_write := vk.WriteDescriptorSet {
+			sType            = .WRITE_DESCRIPTOR_SET,
+			dstSet           = descriptor_sets[i],
+			dstBinding       = 0,
+			dstArrayElement  = 0,
+			descriptorType   = .UNIFORM_BUFFER,
+			descriptorCount  = 1,
+			pBufferInfo      = &buffer_info,
+			pImageInfo       = nil,
+			pTexelBufferView = nil,
+		}
+
+		vk.UpdateDescriptorSets(device, 1, &descriptor_write, 0, nil)
+	}
+}
+
+create_descriptor_pool :: proc() {
+	pool_size := vk.DescriptorPoolSize {
+		type            = .UNIFORM_BUFFER,
+		descriptorCount = MAX_FRAMES_IN_FLIGHT,
+	}
+
+	pool_info := vk.DescriptorPoolCreateInfo {
+		sType         = .DESCRIPTOR_POOL_CREATE_INFO,
+		poolSizeCount = 1,
+		pPoolSizes    = &pool_size,
+		maxSets       = MAX_FRAMES_IN_FLIGHT,
+	}
+
+	must(vk.CreateDescriptorPool(device, &pool_info, nil, &descriptor_pool))
+}
+
+create_uniform_buffers :: proc() {
+	buffer_size := vk.DeviceSize(size_of(Uniform_Buffer_Object))
+
+	for i := 0; i < MAX_FRAMES_IN_FLIGHT; i += 1 {
+		create_buffer(
+			buffer_size,
+			{.UNIFORM_BUFFER},
+			{.HOST_VISIBLE, .HOST_COHERENT},
+			&uniform_buffers[i],
+			&uniform_buffers_memory[i],
+		)
+
+		vk.MapMemory(
+			device,
+			uniform_buffers_memory[i],
+			0,
+			buffer_size,
+			{},
+			&uniform_buffers_mapped[i],
+		)
+	}
+
+}
+
+create_descriptor_set_layout :: proc() {
+	ubo_layout_binding := vk.DescriptorSetLayoutBinding {
+		binding            = 0,
+		descriptorType     = .UNIFORM_BUFFER,
+		descriptorCount    = 1,
+		pImmutableSamplers = nil,
+		stageFlags         = {.VERTEX},
+	}
+
+	layout_info := vk.DescriptorSetLayoutCreateInfo {
+		sType        = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+		bindingCount = 1,
+		pBindings    = &ubo_layout_binding,
+	}
+
+	must(vk.CreateDescriptorSetLayout(device, &layout_info, nil, &descriptor_set_layout))
 }
 
 find_memory_type :: proc(type_filter: u32, properties: vk.MemoryPropertyFlags) -> u32 {
@@ -431,7 +545,7 @@ create_graphics_pipeline :: proc() {
 		rasterizerDiscardEnable = false,
 		polygonMode             = .FILL,
 		cullMode                = {.BACK},
-		frontFace               = .CLOCKWISE,
+		frontFace               = .COUNTER_CLOCKWISE,
 		depthBiasEnable         = false,
 		lineWidth               = 1.0,
 	}
@@ -467,7 +581,9 @@ create_graphics_pipeline :: proc() {
 	}
 
 	pipeline_layout_info := vk.PipelineLayoutCreateInfo {
-		sType = .PIPELINE_LAYOUT_CREATE_INFO,
+		sType          = .PIPELINE_LAYOUT_CREATE_INFO,
+		setLayoutCount = 1,
+		pSetLayouts    = &descriptor_set_layout,
 	}
 
 	must(vk.CreatePipelineLayout(device, &pipeline_layout_info, nil, &pipeline_layout))
@@ -763,7 +879,7 @@ find_queue_families :: proc(device: vk.PhysicalDevice) -> Queue_Family_Indices {
 	indices: Queue_Family_Indices
 
 	for queue_family, i in queue_families {
-		if vk.QueueFlag.GRAPHICS in queue_family.queueFlags {
+		if .GRAPHICS in queue_family.queueFlags {
 			indices.graphics_family = u32(i)
 		}
 
@@ -1012,7 +1128,11 @@ create_instance :: proc() {
 	assert(vk.DestroyInstance != nil, "vulkan instance function pointers not loaded")
 }
 
-record_command_buffer :: proc(command_buffer: vk.CommandBuffer, image_index: u32) {
+record_command_buffer :: proc(
+	command_buffer: vk.CommandBuffer,
+	image_index: u32,
+	current_frame: u32,
+) {
 	begin_info := vk.CommandBufferBeginInfo {
 		sType            = .COMMAND_BUFFER_BEGIN_INFO,
 		flags            = {},
@@ -1061,6 +1181,17 @@ record_command_buffer :: proc(command_buffer: vk.CommandBuffer, image_index: u32
 
 	vk.CmdSetScissor(command_buffer, 0, 1, &scissor)
 
+	vk.CmdBindDescriptorSets(
+		command_buffer,
+		.GRAPHICS,
+		pipeline_layout,
+		0,
+		1,
+		&descriptor_sets[current_frame],
+		0,
+		nil,
+	)
+
 	vk.CmdDrawIndexed(command_buffer, u32(len(indices)), 1, 0, 0, 0)
 
 	vk.CmdEndRenderPass(command_buffer)
@@ -1094,7 +1225,10 @@ draw_frame :: proc(current_frame: u32) -> u32 {
 	}
 
 	vk.ResetCommandBuffer(command_buffers[current_frame], {})
-	record_command_buffer(command_buffers[current_frame], image_index)
+	record_command_buffer(command_buffers[current_frame], image_index, current_frame)
+
+	update_uniform_buffer(current_frame)
+
 
 	wait_semaphores := []vk.Semaphore{image_available_semaphores[current_frame]}
 	wait_stages := []vk.PipelineStageFlags{{.COLOR_ATTACHMENT_OUTPUT}}
@@ -1134,6 +1268,27 @@ draw_frame :: proc(current_frame: u32) -> u32 {
 	return (current_frame + 1) & MAX_FRAMES_IN_FLIGHT
 }
 
+start_time := time.now()
+update_uniform_buffer :: proc(current_image: u32) {
+	passed_time := f32(time.duration_seconds(time.since(start_time)))
+
+	ubo := Uniform_Buffer_Object {
+		model = linalg.Matrix4f32(
+			1.0,
+		) * linalg.matrix4_rotate(passed_time * math.to_radians_f32(90.0), [3]f32{0.0, 0.0, 1.0}),
+		view  = linalg.matrix4_look_at_f32({2.0, 2.0, 2.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 1.0}),
+		proj  = linalg.matrix4_perspective_f32(
+			math.to_radians_f32(45.0),
+			f32(swap_chain_extent.width) / f32(swap_chain_extent.height),
+			0.1,
+			10.0,
+		),
+	}
+	ubo.proj[1][1] *= -1
+
+	intrinsics.mem_copy_non_overlapping(uniform_buffers_mapped[current_image], &ubo, size_of(ubo))
+}
+
 main_loop :: proc() {
 	current_frame: u32 = 0
 	for !glfw.WindowShouldClose(window) {
@@ -1159,6 +1314,14 @@ cleanup :: proc() {
 	delete(swap_chain_framebuffers)
 	delete(swap_chain_image_views)
 	delete(swap_chain_images)
+
+	for i := 0; i < MAX_FRAMES_IN_FLIGHT; i += 1 {
+		vk.DestroyBuffer(device, uniform_buffers[i], nil)
+		vk.FreeMemory(device, uniform_buffers_memory[i], nil)
+	}
+
+	vk.DestroyDescriptorPool(device, descriptor_pool, nil)
+	vk.DestroyDescriptorSetLayout(device, descriptor_set_layout, nil)
 
 	vk.DestroyBuffer(device, index_buffer, nil)
 	vk.FreeMemory(device, index_buffer_memory, nil)
