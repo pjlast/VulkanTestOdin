@@ -33,7 +33,7 @@ HEIGHT :: 600
 ENABLE_VALIDATION_LAYERS :: #config(ENABLE_VALIDATION_LAYERS, ODIN_DEBUG)
 
 Vertex :: struct {
-	pos:       [2]f32,
+	pos:       [3]f32,
 	color:     [3]f32,
 	tex_coord: [2]f32,
 }
@@ -46,14 +46,22 @@ Uniform_Buffer_Object :: struct #align (16) {
 
 //odinfmt: disable
 vertices := []Vertex {
-	{{-0.5, -0.5}, {1.0, 0.0, 0.0}, {1.0, 0.0}},
-	{{ 0.5, -0.5}, {0.0, 1.0, 0.0}, {0.0, 0.0}},
-	{{ 0.5,  0.5}, {0.0, 0.0, 1.0}, {0.0, 1.0}},
-	{{-0.5,  0.5}, {1.0, 1.0, 1.0}, {1.0, 1.0}},
+	{{-0.5, -0.5, 0.0}, {1.0, 0.0, 0.0}, {1.0, 0.0}},
+	{{ 0.5, -0.5, 0.0}, {0.0, 1.0, 0.0}, {0.0, 0.0}},
+	{{ 0.5,  0.5, 0.0}, {0.0, 0.0, 1.0}, {0.0, 1.0}},
+	{{-0.5,  0.5, 0.0}, {1.0, 1.0, 1.0}, {1.0, 1.0}},
+
+	{{-0.5, -0.5, -0.5}, {1.0, 0.0, 0.0}, {1.0, 0.0}},
+	{{ 0.5, -0.5, -0.5}, {0.0, 1.0, 0.0}, {0.0, 0.0}},
+	{{ 0.5,  0.5, -0.5}, {0.0, 0.0, 1.0}, {0.0, 1.0}},
+	{{-0.5,  0.5, -0.5}, {1.0, 1.0, 1.0}, {1.0, 1.0}},
+}
+
+indices := []u16{
+	0, 1, 2, 2, 3, 0,
+	4, 5, 6, 6, 7, 4,
 }
 //odinfmt: enable
-
-indices := []u16{0, 1, 2, 2, 3, 0}
 
 get_vertex_binding_description :: proc() -> vk.VertexInputBindingDescription {
 	binding_description := vk.VertexInputBindingDescription {
@@ -67,7 +75,12 @@ get_vertex_binding_description :: proc() -> vk.VertexInputBindingDescription {
 
 get_vertex_attribute_descriptions :: proc() -> [3]vk.VertexInputAttributeDescription {
 	attribute_descriptions := [3]vk.VertexInputAttributeDescription {
-		{binding = 0, location = 0, format = .R32G32_SFLOAT, offset = u32(offset_of(Vertex, pos))},
+		{
+			binding = 0,
+			location = 0,
+			format = .R32G32B32_SFLOAT,
+			offset = u32(offset_of(Vertex, pos)),
+		},
 		{
 			binding = 0,
 			location = 1,
@@ -122,6 +135,9 @@ texture_image: vk.Image
 texture_image_memory: vk.DeviceMemory
 texture_image_view: vk.ImageView
 texture_sampler: vk.Sampler
+depth_image: vk.Image
+depth_image_memory: vk.DeviceMemory
+depth_image_view: vk.ImageView
 
 device_extensions: [dynamic]cstring
 
@@ -180,8 +196,9 @@ init_vulkan :: proc() {
 	create_render_pass()
 	create_descriptor_set_layout()
 	create_graphics_pipeline()
-	create_framebuffers()
 	create_command_pool()
+	create_depth_resources()
+	create_framebuffers()
 	create_texture_image()
 	create_texture_image_view()
 	create_texture_sampler()
@@ -192,6 +209,54 @@ init_vulkan :: proc() {
 	create_descriptor_sets()
 	create_command_buffers()
 	create_sync_objects()
+}
+
+find_supported_format :: proc(
+	candidates: []vk.Format,
+	tiling: vk.ImageTiling,
+	features: vk.FormatFeatureFlags,
+) -> vk.Format {
+	for format in candidates {
+		props: vk.FormatProperties
+		vk.GetPhysicalDeviceFormatProperties(physical_device, format, &props)
+
+		if tiling == .LINEAR && (props.linearTilingFeatures & features) == features {
+			return format
+		} else if tiling == .OPTIMAL && (props.optimalTilingFeatures & features) == features {
+			return format
+		}
+	}
+
+	log.panic("failed to find a supported format")
+}
+
+find_depth_format :: proc() -> vk.Format {
+	return find_supported_format(
+		{.D32_SFLOAT, .D32_SFLOAT_S8_UINT, .D24_UNORM_S8_UINT},
+		.OPTIMAL,
+		{.DEPTH_STENCIL_ATTACHMENT},
+	)
+}
+
+has_stencil_component :: proc(format: vk.Format) -> bool {
+	return format == .D32_SFLOAT_S8_UINT || format == .D24_UNORM_S8_UINT
+}
+
+create_depth_resources :: proc() {
+	depth_format := find_depth_format()
+
+	create_image(
+		swap_chain_extent.width,
+		swap_chain_extent.height,
+		depth_format,
+		.OPTIMAL,
+		{.DEPTH_STENCIL_ATTACHMENT},
+		{.DEVICE_LOCAL},
+		&depth_image,
+		&depth_image_memory,
+	)
+
+	depth_image_view = create_image_view(depth_image, depth_format, {.DEPTH})
 }
 
 create_texture_sampler :: proc() {
@@ -220,7 +285,11 @@ create_texture_sampler :: proc() {
 	must(vk.CreateSampler(device, &sampler_info, nil, &texture_sampler))
 }
 
-create_image_view :: proc(image: vk.Image, format: vk.Format) -> vk.ImageView {
+create_image_view :: proc(
+	image: vk.Image,
+	format: vk.Format,
+	aspect_flags: vk.ImageAspectFlags,
+) -> vk.ImageView {
 	image_view: vk.ImageView
 
 	view_info := vk.ImageViewCreateInfo {
@@ -229,7 +298,7 @@ create_image_view :: proc(image: vk.Image, format: vk.Format) -> vk.ImageView {
 		viewType = .D2,
 		format = format,
 		subresourceRange = {
-			aspectMask = {.COLOR},
+			aspectMask = aspect_flags,
 			baseMipLevel = 0,
 			levelCount = 1,
 			baseArrayLayer = 0,
@@ -243,7 +312,7 @@ create_image_view :: proc(image: vk.Image, format: vk.Format) -> vk.ImageView {
 }
 
 create_texture_image_view :: proc() {
-	texture_image_view = create_image_view(texture_image, .R8G8B8A8_SRGB)
+	texture_image_view = create_image_view(texture_image, .R8G8B8A8_SRGB, {.COLOR})
 }
 
 create_texture_image :: proc() {
@@ -311,10 +380,10 @@ create_image :: proc(
 		extent = {width = width, height = height, depth = 1},
 		mipLevels = 1,
 		arrayLayers = 1,
-		format = .R8G8B8A8_SRGB,
+		format = format,
 		tiling = .OPTIMAL,
 		initialLayout = .UNDEFINED,
-		usage = {.TRANSFER_DST, .SAMPLED},
+		usage = usage,
 		sharingMode = .EXCLUSIVE,
 		samples = {._1},
 		flags = {},
@@ -722,12 +791,12 @@ create_framebuffers :: proc() {
 	resize(&swap_chain_framebuffers, len(swap_chain_image_views))
 
 	for swap_chain_image_view, i in swap_chain_image_views {
-		attachments := []vk.ImageView{swap_chain_image_view}
+		attachments := []vk.ImageView{swap_chain_image_view, depth_image_view}
 
 		framebuffer_info := vk.FramebufferCreateInfo {
 			sType           = .FRAMEBUFFER_CREATE_INFO,
 			renderPass      = render_pass,
-			attachmentCount = 1,
+			attachmentCount = u32(len(attachments)),
 			pAttachments    = raw_data(attachments),
 			width           = swap_chain_extent.width,
 			height          = swap_chain_extent.height,
@@ -873,6 +942,19 @@ create_graphics_pipeline :: proc() {
 
 	must(vk.CreatePipelineLayout(device, &pipeline_layout_info, nil, &pipeline_layout))
 
+	depth_stencil: vk.PipelineDepthStencilStateCreateInfo = {
+		sType            = .PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+		depthTestEnable  = true,
+		depthWriteEnable = true,
+		depthCompareOp   = .LESS,
+		depthBoundsTestEnable = false,
+		minDepthBounds = 0.0,
+		maxDepthBounds = 1.0,
+		stencilTestEnable = false,
+		front = {},
+		back = {},
+	}
+
 	pipeline_info := vk.GraphicsPipelineCreateInfo {
 		sType               = .GRAPHICS_PIPELINE_CREATE_INFO,
 		stageCount          = 2,
@@ -882,7 +964,7 @@ create_graphics_pipeline :: proc() {
 		pViewportState      = &viewport_state,
 		pRasterizationState = &rasterizer,
 		pMultisampleState   = &multisampling,
-		pDepthStencilState  = nil,
+		pDepthStencilState  = &depth_stencil,
 		pColorBlendState    = &color_blending,
 		pDynamicState       = &dynamic_state,
 		layout              = pipeline_layout,
@@ -914,25 +996,44 @@ create_render_pass :: proc() {
 		layout     = .COLOR_ATTACHMENT_OPTIMAL,
 	}
 
-	subpass := vk.SubpassDescription {
-		pipelineBindPoint    = .GRAPHICS,
-		colorAttachmentCount = 1,
-		pColorAttachments    = &color_attachment_ref,
+	depth_attachment: vk.AttachmentDescription = {
+		format         = find_depth_format(),
+		samples        = {._1},
+		loadOp         = .CLEAR,
+		storeOp        = .DONT_CARE,
+		stencilLoadOp  = .DONT_CARE,
+		stencilStoreOp = .DONT_CARE,
+		initialLayout  = .UNDEFINED,
+		finalLayout    = .DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
 	}
+
+	depth_attachment_ref: vk.AttachmentReference = {
+		attachment = 1,
+		layout     = .DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+	}
+
+	subpass := vk.SubpassDescription {
+		pipelineBindPoint       = .GRAPHICS,
+		colorAttachmentCount    = 1,
+		pColorAttachments       = &color_attachment_ref,
+		pDepthStencilAttachment = &depth_attachment_ref,
+	}
+
+	attachments: [2]vk.AttachmentDescription = {color_attachment, depth_attachment}
 
 	dependency := vk.SubpassDependency {
 		srcSubpass    = vk.SUBPASS_EXTERNAL,
 		dstSubpass    = 0,
-		srcStageMask  = {.COLOR_ATTACHMENT_OUTPUT},
-		dstStageMask  = {.COLOR_ATTACHMENT_OUTPUT},
+		srcStageMask  = {.COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS},
+		dstStageMask  = {.COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS},
 		srcAccessMask = {},
-		dstAccessMask = {.COLOR_ATTACHMENT_WRITE},
+		dstAccessMask = {.COLOR_ATTACHMENT_WRITE, .DEPTH_STENCIL_ATTACHMENT_WRITE},
 	}
 
 	render_pass_info := vk.RenderPassCreateInfo {
 		sType           = .RENDER_PASS_CREATE_INFO,
-		attachmentCount = 1,
-		pAttachments    = &color_attachment,
+		attachmentCount = len(attachments),
+		pAttachments    = raw_data(attachments[:]),
 		subpassCount    = 1,
 		pSubpasses      = &subpass,
 		dependencyCount = 1,
@@ -946,7 +1047,11 @@ create_image_views :: proc() {
 	resize(&swap_chain_image_views, len(swap_chain_images))
 
 	for swap_chain_image, i in swap_chain_images {
-		swap_chain_image_views[i] = create_image_view(swap_chain_image, swap_chain_image_format)
+		swap_chain_image_views[i] = create_image_view(
+			swap_chain_image,
+			swap_chain_image_format,
+			{.COLOR},
+		)
 	}
 }
 
@@ -1063,10 +1168,15 @@ recreate_swap_chain :: proc() {
 
 	create_swap_chain()
 	create_image_views()
+	create_depth_resources()
 	create_framebuffers()
 }
 
 cleanup_swap_chain :: proc() {
+	vk.DestroyImageView(device, depth_image_view, nil)
+	vk.DestroyImage(device, depth_image, nil)
+	vk.FreeMemory(device, depth_image_memory, nil)
+
 	for framebuffer in swap_chain_framebuffers {
 		vk.DestroyFramebuffer(device, framebuffer, nil)
 	}
@@ -1428,11 +1538,13 @@ record_command_buffer :: proc(
 		renderArea = {offset = {0, 0}, extent = swap_chain_extent},
 	}
 
-	clear_color := vk.ClearValue {
-		color = {float32 = {0.0, 0.0, 0.0, 1.0}},
+	clear_values: []vk.ClearValue = {
+		{color = {float32 = {0.0, 0.0, 0.0, 1.0}}},
+		{depthStencil = {1.0, 0.0}},
 	}
-	render_pass_info.clearValueCount = 1
-	render_pass_info.pClearValues = &clear_color
+
+	render_pass_info.clearValueCount = u32(len(clear_values))
+	render_pass_info.pClearValues = raw_data(clear_values)
 
 	vk.CmdBeginRenderPass(command_buffer, &render_pass_info, .INLINE)
 	vk.CmdBindPipeline(command_buffer, .GRAPHICS, graphics_pipeline)
