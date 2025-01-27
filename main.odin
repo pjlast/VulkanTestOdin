@@ -6,6 +6,8 @@ import "core:fmt"
 import "core:log"
 import "core:math"
 import "core:math/linalg"
+import "core:os"
+import "core:strconv"
 import "core:strings"
 import "core:time"
 import "vendor:glfw"
@@ -30,6 +32,9 @@ glfw_error_callback :: proc "c" (code: i32, description: cstring) {
 WIDTH :: 800
 HEIGHT :: 600
 
+MODEL_PATH :: "models/viking_room.obj"
+TEXTURE_PATH :: "textures/viking_room.png"
+
 ENABLE_VALIDATION_LAYERS :: #config(ENABLE_VALIDATION_LAYERS, ODIN_DEBUG)
 
 Vertex :: struct {
@@ -44,24 +49,9 @@ Uniform_Buffer_Object :: struct #align (16) {
 	proj:  linalg.Matrix4f32,
 }
 
-//odinfmt: disable
-vertices := []Vertex {
-	{{-0.5, -0.5, 0.0}, {1.0, 0.0, 0.0}, {1.0, 0.0}},
-	{{ 0.5, -0.5, 0.0}, {0.0, 1.0, 0.0}, {0.0, 0.0}},
-	{{ 0.5,  0.5, 0.0}, {0.0, 0.0, 1.0}, {0.0, 1.0}},
-	{{-0.5,  0.5, 0.0}, {1.0, 1.0, 1.0}, {1.0, 1.0}},
+vertices: []Vertex
 
-	{{-0.5, -0.5, -0.5}, {1.0, 0.0, 0.0}, {1.0, 0.0}},
-	{{ 0.5, -0.5, -0.5}, {0.0, 1.0, 0.0}, {0.0, 0.0}},
-	{{ 0.5,  0.5, -0.5}, {0.0, 0.0, 1.0}, {0.0, 1.0}},
-	{{-0.5,  0.5, -0.5}, {1.0, 1.0, 1.0}, {1.0, 1.0}},
-}
-
-indices := []u16{
-	0, 1, 2, 2, 3, 0,
-	4, 5, 6, 6, 7, 4,
-}
-//odinfmt: enable
+indices: []u16
 
 get_vertex_binding_description :: proc() -> vk.VertexInputBindingDescription {
 	binding_description := vk.VertexInputBindingDescription {
@@ -202,6 +192,7 @@ init_vulkan :: proc() {
 	create_texture_image()
 	create_texture_image_view()
 	create_texture_sampler()
+	load_model()
 	create_vertex_buffer()
 	create_index_buffer()
 	create_uniform_buffers()
@@ -209,6 +200,147 @@ init_vulkan :: proc() {
 	create_descriptor_sets()
 	create_command_buffers()
 	create_sync_objects()
+}
+
+load_obj :: proc(filepath: string) -> ([]Vertex, []u16, bool) {
+	data, ok := os.read_entire_file(filepath)
+	if !ok {
+		fmt.println("Failed to read file:", filepath)
+		return nil, nil, false
+	}
+	defer delete(data)
+
+	content := string(data)
+	lines := strings.split_lines(content)
+	defer delete(lines)
+
+	vertices := make([dynamic]Vertex)
+	indices := make([dynamic]u16)
+
+	// Temporary storage for vertex positions and texture coordinates
+	vertex_positions: [dynamic][3]f32
+	vertex_positions = make([dynamic][3]f32)
+	defer delete(vertex_positions)
+
+	texture_coords: [dynamic][2]f32
+	texture_coords = make([dynamic][2]f32)
+	defer delete(texture_coords)
+
+	// Map to store unique vertex combinations
+	vertex_map := make(map[string]u16)
+	defer delete(vertex_map)
+
+	for line in lines {
+		if len(line) == 0 do continue
+
+		parts := strings.split(line, " ")
+		defer delete(parts)
+
+		if len(parts) == 0 do continue
+
+		switch parts[0] {
+		case "v":
+			if len(parts) < 4 do continue
+
+			x, ok1 := strconv.parse_f32(parts[1])
+			y, ok2 := strconv.parse_f32(parts[2])
+			z, ok3 := strconv.parse_f32(parts[3])
+
+			if !ok1 || !ok2 || !ok3 {
+				fmt.println("Failed to parse vertex:", line)
+				continue
+			}
+
+			append(&vertex_positions, [3]f32{x, y, z})
+
+		case "vt":
+			if len(parts) < 3 do continue
+
+			u, ok1 := strconv.parse_f32(parts[1])
+			v, ok2 := strconv.parse_f32(parts[2])
+
+			if !ok1 || !ok2 {
+				fmt.println("Failed to parse texture coordinate:", line)
+				continue
+			}
+
+			v = 1.0 - v
+
+			append(&texture_coords, [2]f32{u, v})
+
+		case "f":
+			if len(parts) < 4 do continue
+
+			face_vertices: [dynamic]u16
+			face_vertices = make([dynamic]u16)
+			defer delete(face_vertices)
+
+			// Process all vertices in the face
+			for i := 1; i < len(parts); i += 1 {
+				vertex_data := strings.split(parts[i], "/")
+				defer delete(vertex_data)
+
+				if len(vertex_data) < 2 do continue
+
+				// Get vertex and texture indices
+				vertex_idx, ok1 := strconv.parse_uint(vertex_data[0])
+				tex_coord_idx, ok2 := strconv.parse_uint(vertex_data[1])
+
+				if !ok1 || !ok2 {
+					fmt.println("Failed to parse face indices:", parts[i])
+					continue
+				}
+
+				// Convert to 0-based indices
+				vertex_idx -= 1
+				tex_coord_idx -= 1
+
+				if vertex_idx >= len(vertex_positions) || tex_coord_idx >= len(texture_coords) {
+					fmt.println("Vertex or texture coordinate index out of range:", parts[i])
+					continue
+				}
+
+				// Create a unique key for this vertex combination
+				vertex_key := fmt.tprintf("%v_%v", vertex_idx, tex_coord_idx)
+
+				// Check if we've seen this vertex combination before
+				if existing_index, exists := vertex_map[vertex_key]; exists {
+					append(&face_vertices, existing_index)
+				} else {
+					// Create new vertex
+					vertex := Vertex {
+						pos       = vertex_positions[vertex_idx],
+						color     = [3]f32{1.0, 1.0, 1.0},
+						tex_coord = texture_coords[tex_coord_idx],
+					}
+
+					new_index := u16(len(vertices))
+					append(&vertices, vertex)
+					vertex_map[vertex_key] = new_index
+					append(&face_vertices, new_index)
+				}
+			}
+
+			// Triangulate the face
+			for i := 1; i < len(face_vertices) - 1; i += 1 {
+				append(&indices, face_vertices[0])
+				append(&indices, face_vertices[i])
+				append(&indices, face_vertices[i + 1])
+			}
+		}
+	}
+
+	return vertices[:], indices[:], true
+}
+
+load_model :: proc() {
+	ok: bool
+	vertices, indices, ok = load_obj(MODEL_PATH)
+	if !ok {
+		log.panic("could not load model")
+	}
+
+	fmt.println(len(vertices))
 }
 
 find_supported_format :: proc(
@@ -317,7 +449,7 @@ create_texture_image_view :: proc() {
 
 create_texture_image :: proc() {
 	tex_width, tex_height, tex_channels: i32
-	pixels := image.load("textures/texture.jpg", &tex_width, &tex_height, &tex_channels, 4)
+	pixels := image.load(TEXTURE_PATH, &tex_width, &tex_height, &tex_channels, 4)
 	image_size := vk.DeviceSize(tex_width * tex_height * 4)
 
 	if pixels == nil {
@@ -943,16 +1075,16 @@ create_graphics_pipeline :: proc() {
 	must(vk.CreatePipelineLayout(device, &pipeline_layout_info, nil, &pipeline_layout))
 
 	depth_stencil: vk.PipelineDepthStencilStateCreateInfo = {
-		sType            = .PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-		depthTestEnable  = true,
-		depthWriteEnable = true,
-		depthCompareOp   = .LESS,
+		sType                 = .PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+		depthTestEnable       = true,
+		depthWriteEnable      = true,
+		depthCompareOp        = .LESS,
 		depthBoundsTestEnable = false,
-		minDepthBounds = 0.0,
-		maxDepthBounds = 1.0,
-		stencilTestEnable = false,
-		front = {},
-		back = {},
+		minDepthBounds        = 0.0,
+		maxDepthBounds        = 1.0,
+		stencilTestEnable     = false,
+		front                 = {},
+		back                  = {},
 	}
 
 	pipeline_info := vk.GraphicsPipelineCreateInfo {
