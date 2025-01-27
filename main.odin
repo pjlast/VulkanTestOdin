@@ -33,8 +33,9 @@ HEIGHT :: 600
 ENABLE_VALIDATION_LAYERS :: #config(ENABLE_VALIDATION_LAYERS, ODIN_DEBUG)
 
 Vertex :: struct {
-	pos:   [2]f32,
-	color: [3]f32,
+	pos:       [2]f32,
+	color:     [3]f32,
+	tex_coord: [2]f32,
 }
 
 Uniform_Buffer_Object :: struct #align (16) {
@@ -45,10 +46,10 @@ Uniform_Buffer_Object :: struct #align (16) {
 
 //odinfmt: disable
 vertices := []Vertex {
-	{{-0.5, -0.5}, {1.0, 0.0, 0.0}},
-	{{ 0.5, -0.5}, {0.0, 1.0, 0.0}},
-	{{ 0.5,  0.5}, {0.0, 0.0, 1.0}},
-	{{-0.5,  0.5}, {1.0, 1.0, 1.0}},
+	{{-0.5, -0.5}, {1.0, 0.0, 0.0}, {1.0, 0.0}},
+	{{ 0.5, -0.5}, {0.0, 1.0, 0.0}, {0.0, 0.0}},
+	{{ 0.5,  0.5}, {0.0, 0.0, 1.0}, {0.0, 1.0}},
+	{{-0.5,  0.5}, {1.0, 1.0, 1.0}, {1.0, 1.0}},
 }
 //odinfmt: enable
 
@@ -64,14 +65,20 @@ get_vertex_binding_description :: proc() -> vk.VertexInputBindingDescription {
 	return binding_description
 }
 
-get_vertex_attribute_descriptions :: proc() -> [2]vk.VertexInputAttributeDescription {
-	attribute_descriptions := [2]vk.VertexInputAttributeDescription {
+get_vertex_attribute_descriptions :: proc() -> [3]vk.VertexInputAttributeDescription {
+	attribute_descriptions := [3]vk.VertexInputAttributeDescription {
 		{binding = 0, location = 0, format = .R32G32_SFLOAT, offset = u32(offset_of(Vertex, pos))},
 		{
 			binding = 0,
 			location = 1,
 			format = .R32G32B32_SFLOAT,
 			offset = u32(offset_of(Vertex, color)),
+		},
+		{
+			binding = 0,
+			location = 2,
+			format = .R32G32_SFLOAT,
+			offset = u32(offset_of(Vertex, tex_coord)),
 		},
 	}
 
@@ -350,7 +357,14 @@ create_descriptor_sets :: proc() {
 			range  = size_of(Uniform_Buffer_Object),
 		}
 
-		descriptor_write := vk.WriteDescriptorSet {
+		image_info: vk.DescriptorImageInfo = {
+			imageLayout = .SHADER_READ_ONLY_OPTIMAL,
+			imageView   = texture_image_view,
+			sampler     = texture_sampler,
+		}
+
+		descriptor_writes: [2]vk.WriteDescriptorSet = {}
+		descriptor_writes[0] = vk.WriteDescriptorSet {
 			sType            = .WRITE_DESCRIPTOR_SET,
 			dstSet           = descriptor_sets[i],
 			dstBinding       = 0,
@@ -362,20 +376,41 @@ create_descriptor_sets :: proc() {
 			pTexelBufferView = nil,
 		}
 
-		vk.UpdateDescriptorSets(device, 1, &descriptor_write, 0, nil)
+		descriptor_writes[1] = vk.WriteDescriptorSet {
+			sType           = .WRITE_DESCRIPTOR_SET,
+			dstSet          = descriptor_sets[i],
+			dstBinding      = 1,
+			dstArrayElement = 0,
+			descriptorType  = .COMBINED_IMAGE_SAMPLER,
+			descriptorCount = 1,
+			pImageInfo      = &image_info,
+		}
+
+		vk.UpdateDescriptorSets(
+			device,
+			len(descriptor_writes),
+			raw_data(descriptor_writes[:]),
+			0,
+			nil,
+		)
 	}
 }
 
 create_descriptor_pool :: proc() {
-	pool_size := vk.DescriptorPoolSize {
+	pool_sizes: [2]vk.DescriptorPoolSize = {}
+	pool_sizes[0] = vk.DescriptorPoolSize {
 		type            = .UNIFORM_BUFFER,
+		descriptorCount = MAX_FRAMES_IN_FLIGHT,
+	}
+	pool_sizes[1] = vk.DescriptorPoolSize {
+		type            = .COMBINED_IMAGE_SAMPLER,
 		descriptorCount = MAX_FRAMES_IN_FLIGHT,
 	}
 
 	pool_info := vk.DescriptorPoolCreateInfo {
 		sType         = .DESCRIPTOR_POOL_CREATE_INFO,
-		poolSizeCount = 1,
-		pPoolSizes    = &pool_size,
+		poolSizeCount = len(pool_sizes),
+		pPoolSizes    = raw_data(pool_sizes[:]),
 		maxSets       = MAX_FRAMES_IN_FLIGHT,
 	}
 
@@ -415,10 +450,20 @@ create_descriptor_set_layout :: proc() {
 		stageFlags         = {.VERTEX},
 	}
 
+	sampler_layout_binding: vk.DescriptorSetLayoutBinding = {
+		binding            = 1,
+		descriptorCount    = 1,
+		descriptorType     = vk.DescriptorType.COMBINED_IMAGE_SAMPLER,
+		pImmutableSamplers = nil,
+		stageFlags         = {.FRAGMENT},
+	}
+
+	bindings: [2]vk.DescriptorSetLayoutBinding = {ubo_layout_binding, sampler_layout_binding}
+
 	layout_info := vk.DescriptorSetLayoutCreateInfo {
 		sType        = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-		bindingCount = 1,
-		pBindings    = &ubo_layout_binding,
+		bindingCount = len(bindings),
+		pBindings    = raw_data(bindings[:]),
 	}
 
 	must(vk.CreateDescriptorSetLayout(device, &layout_info, nil, &descriptor_set_layout))
