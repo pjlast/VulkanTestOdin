@@ -113,6 +113,8 @@ descriptor_pool: vk.DescriptorPool
 descriptor_sets: [MAX_FRAMES_IN_FLIGHT]vk.DescriptorSet
 texture_image: vk.Image
 texture_image_memory: vk.DeviceMemory
+texture_image_view: vk.ImageView
+texture_sampler: vk.Sampler
 
 device_extensions: [dynamic]cstring
 
@@ -174,6 +176,8 @@ init_vulkan :: proc() {
 	create_framebuffers()
 	create_command_pool()
 	create_texture_image()
+	create_texture_image_view()
+	create_texture_sampler()
 	create_vertex_buffer()
 	create_index_buffer()
 	create_uniform_buffers()
@@ -181,6 +185,58 @@ init_vulkan :: proc() {
 	create_descriptor_sets()
 	create_command_buffers()
 	create_sync_objects()
+}
+
+create_texture_sampler :: proc() {
+	properties: vk.PhysicalDeviceProperties
+	vk.GetPhysicalDeviceProperties(physical_device, &properties)
+
+	sampler_info := vk.SamplerCreateInfo {
+		sType                   = .SAMPLER_CREATE_INFO,
+		magFilter               = .LINEAR,
+		minFilter               = .LINEAR,
+		addressModeU            = .REPEAT,
+		addressModeV            = .REPEAT,
+		addressModeW            = .REPEAT,
+		anisotropyEnable        = true,
+		maxAnisotropy           = properties.limits.maxSamplerAnisotropy,
+		borderColor             = .INT_OPAQUE_BLACK,
+		unnormalizedCoordinates = false,
+		compareEnable           = false,
+		compareOp               = .ALWAYS,
+		mipmapMode              = .LINEAR,
+		mipLodBias              = 0.0,
+		minLod                  = 0.0,
+		maxLod                  = 0.0,
+	}
+
+	must(vk.CreateSampler(device, &sampler_info, nil, &texture_sampler))
+}
+
+create_image_view :: proc(image: vk.Image, format: vk.Format) -> vk.ImageView {
+	image_view: vk.ImageView
+
+	view_info := vk.ImageViewCreateInfo {
+		sType = .IMAGE_VIEW_CREATE_INFO,
+		image = image,
+		viewType = .D2,
+		format = format,
+		subresourceRange = {
+			aspectMask = {.COLOR},
+			baseMipLevel = 0,
+			levelCount = 1,
+			baseArrayLayer = 0,
+			layerCount = 1,
+		},
+	}
+
+	must(vk.CreateImageView(device, &view_info, nil, &image_view))
+
+	return image_view
+}
+
+create_texture_image_view :: proc() {
+	texture_image_view = create_image_view(texture_image, .R8G8B8A8_SRGB)
 }
 
 create_texture_image :: proc() {
@@ -845,22 +901,7 @@ create_image_views :: proc() {
 	resize(&swap_chain_image_views, len(swap_chain_images))
 
 	for swap_chain_image, i in swap_chain_images {
-		create_info := vk.ImageViewCreateInfo {
-			sType = .IMAGE_VIEW_CREATE_INFO,
-			image = swap_chain_image,
-			viewType = .D2,
-			format = swap_chain_image_format,
-			components = {r = .IDENTITY, g = .IDENTITY, b = .IDENTITY, a = .IDENTITY},
-			subresourceRange = {
-				aspectMask = {.COLOR},
-				baseMipLevel = 0,
-				levelCount = 1,
-				baseArrayLayer = 0,
-				layerCount = 1,
-			},
-		}
-
-		must(vk.CreateImageView(device, &create_info, nil, &swap_chain_image_views[i]))
+		swap_chain_image_views[i] = create_image_view(swap_chain_image, swap_chain_image_format)
 	}
 }
 
@@ -1011,7 +1052,9 @@ create_logical_device :: proc() {
 		append(&queue_create_infos, queue_create_info)
 	}
 
-	device_features: vk.PhysicalDeviceFeatures
+	device_features := vk.PhysicalDeviceFeatures {
+		samplerAnisotropy = true,
+	}
 
 	create_info := vk.DeviceCreateInfo {
 		sType                = .DEVICE_CREATE_INFO,
@@ -1151,6 +1194,9 @@ is_device_suitable :: proc(device: vk.PhysicalDevice) -> bool {
 
 	extensions_supported := check_device_extension_support(device)
 
+	supported_features: vk.PhysicalDeviceFeatures
+	vk.GetPhysicalDeviceFeatures(device, &supported_features)
+
 	swap_chain_adequate := false
 	if extensions_supported {
 		swap_chain_support := query_swap_chain_support(device)
@@ -1158,7 +1204,12 @@ is_device_suitable :: proc(device: vk.PhysicalDevice) -> bool {
 			len(swap_chain_support.formats) != 0 && len(swap_chain_support.present_modes) != 0
 	}
 
-	return is_indices_complete(indices) && extensions_supported && swap_chain_adequate
+	return(
+		is_indices_complete(indices) &&
+		extensions_supported &&
+		swap_chain_adequate &&
+		supported_features.samplerAnisotropy \
+	)
 }
 
 pick_physical_device :: proc() {
@@ -1498,6 +1549,10 @@ cleanup :: proc() {
 	delete(swap_chain_framebuffers)
 	delete(swap_chain_image_views)
 	delete(swap_chain_images)
+
+	vk.DestroySampler(device, texture_sampler, nil)
+
+	vk.DestroyImageView(device, texture_image_view, nil)
 
 	vk.DestroyImage(device, texture_image, nil)
 	vk.FreeMemory(device, texture_image_memory, nil)
