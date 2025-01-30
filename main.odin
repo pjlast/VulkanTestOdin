@@ -339,8 +339,6 @@ load_model :: proc() {
 	if !ok {
 		log.panic("could not load model")
 	}
-
-	fmt.println(len(vertices))
 }
 
 find_supported_format :: proc(
